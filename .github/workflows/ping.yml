@@ -1,0 +1,65 @@
+name: Keep Render backends warm
+
+# Render's free tier stops a web service after ~15 min without traffic, and
+# the next visitor pays a 30-60s cold start. On UBE Présences that delay
+# exceeded the app's HTTP timeout, so the login screen reported it as
+# "mot de passe incorrect" — users chased a credential problem that did not
+# exist.
+#
+# This repository exists only to run that ping. It is public on purpose:
+# GitHub Actions minutes are unmetered for public repositories, while a
+# private repo only gets 2000 minutes/month — and a 10-minute ping bills
+# ~4320 minutes/month (every run is rounded up to a full minute), so the
+# allowance runs out around day 14 and the schedule stops silently.
+#
+# No source code and no secrets belong here: only public health URLs.
+on:
+  schedule:
+    # Ping every 10 minutes, offset by 3 to avoid the top-of-hour rush on
+    # GitHub's scheduler (runs queued then are the most likely to be delayed).
+    - cron: "3,13,23,33,43,53 * * * *"
+    # Monthly heartbeat — see the commit step below.
+    - cron: "0 4 1 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backends
+        if: github.event.schedule != '0 4 1 * *'
+        run: |
+          for url in \
+            "https://ube-presence-backend.onrender.com/health" \
+            "https://orientcam-platform.onrender.com/health"
+          do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "$url" || echo "000")
+            echo "$url -> HTTP $code"
+            # A cold start can still exceed the timeout on the first hit; the
+            # next run 10 minutes later lands on a warm service. Only flag
+            # server-side failures, and never fail the job — a red X here
+            # would just add noise to a keep-alive.
+            if [ "$code" = "000" ] || [ "$code" -ge 500 ]; then
+              echo "::warning::$url answered $code"
+            fi
+          done
+
+      - uses: actions/checkout@v4
+        if: github.event.schedule == '0 4 1 * *'
+
+      - name: Monthly heartbeat commit
+        if: github.event.schedule == '0 4 1 * *'
+        # GitHub disables scheduled workflows in a repository that has had no
+        # activity for 60 days. Nothing is ever committed here otherwise, so
+        # the ping would quietly die two months in — the exact silent failure
+        # this repo replaced. One commit a month keeps the repo active.
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > last-heartbeat.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last-heartbeat.txt
+          git commit -m "chore: monthly heartbeat to keep the schedule enabled"
+          git push
